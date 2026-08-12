@@ -373,41 +373,31 @@ void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
       //StandardMetrics.ms_v_env_cabintemp->SetValue(((float)(d[3])-51));
       //Cabin Temp Set/Evap Temp Target
       //***********
-      switch (d[1]&0xC0) {
-        case 0x0: {
-        // PreCondCabinSts  (0x0 off, 0x1 on, 0x2 Set point reached)
-        //d[1] 11000000
-        StandardMetrics.ms_v_env_valet->SetValue(false);    
-        break;
-        } 
-        case 0x40: {
-        // PreCondCabinSts  (0x0 off, 0x1 on, 0x2 Set point reached)
-        //d[1] 11000000
-        StandardMetrics.ms_v_env_valet->SetValue(true); 
-        break;
-        }
-        case 0xC0: {
-        // PreCondCabinSts  (0x0 off, 0x1 on, 0x2 Set point reached)
-        //d[1] 11000000
-	      StandardMetrics.ms_v_env_valet->SetValue(true);
-        break;
-        }
-        case 0x80: {
-        // Set point reached. The cabin is still being conditioned -- the climate
-        // system cycles through this state continuously while holding
-        // temperature -- so it maps to active, not off.
-        //
-        // This case was previously absent and fell through to default: -> false,
-        // which made the metric toggle once per thermostat cycle. Every toggle
-        // signals an event and fires a valet notification, so a parked car
-        // holding temperature produced a continuous stream of both.
-        // See tests/test_transitions.cpp.
-        //d[1] 11000000
-        StandardMetrics.ms_v_env_valet->SetValue(true);
-        break;
-        }
-      default:
-        StandardMetrics.ms_v_env_valet->SetValue(false);
+      // PreCondCabinSts lives in d[1] bits 6-7: 0 = off, 1 = active,
+      // 2 = set point reached. Every non-off state means the cabin is being
+      // conditioned, so they all map to active.
+      //
+      // "Set point reached" (0x80) was previously unhandled and fell through to
+      // default: -> off. A climate system holding temperature cycles through
+      // that state continuously, so the metric toggled once per thermostat
+      // cycle. See tests/test_transitions.cpp.
+      //
+      // This drives ms_v_env_hvac, not ms_v_env_valet. Preconditioning is
+      // climate control; reporting it as valet mode made the framework send a
+      // "Valet mode enabled" notification on every precondition and arm the
+      // hood/trunk intrusion alerts (vehicle.cpp NotifyValetHood /
+      // NotifyValetTrunk) for as long as it ran.
+      //d[1] 11000000
+      switch (d[1] & 0xC0) {
+        case 0x00:      // off
+          StandardMetrics.ms_v_env_hvac->SetValue(false);
+          break;
+        case 0x40:      // actively conditioning
+        case 0x80:      // set point reached, still conditioning
+        case 0xC0:      // not described in the available bus documentation;
+                        // treated as active, as it was before this change
+          StandardMetrics.ms_v_env_hvac->SetValue(true);
+          break;
       }
       break;
     }
@@ -616,51 +606,69 @@ OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandUnlock(const char* pi
   return Success; 
 }
 
-OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandActivateValet(const char* pin) {
-  CAN_frame_t frame_wu = {};
-  frame_wu.FIR.B.FF = CAN_frame_ext; 
-  frame_wu.MsgID = 0xE094000; // NWM_BCM
-  frame_wu.FIR.B.DLC = 6;
-  frame_wu.data.u8[0] = 0x0;
-  frame_wu.data.u8[1] = 0x1;  // SystemCommand // 0x1 wakeup / 0x2 stay active
-  frame_wu.data.u8[2] = 0x0;
-  frame_wu.data.u8[3] = 0x0;
-  frame_wu.data.u8[4] = 0x0;
-  frame_wu.data.u8[5] = 0x0;
-    
+// Cabin preconditioning. This is server v2 command 26 (Remote Climate Control),
+// and it is also where the framework's own scheduled-preconditioning support
+// looks: vehicle.cpp CheckPreconditionSchedule() calls CommandClimateControl()
+// and gates on ms_v_env_hvac, so that feature could never drive this car while
+// preconditioning lived on the valet commands.
+OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandClimateControl(bool enable) {
   CAN_frame_t frame = {};
-  frame.FIR.B.FF = CAN_frame_ext; 
+  frame.FIR.B.FF = CAN_frame_ext;
   frame.MsgID = 0xE194031; // TCU_PRECOND_NOW
   frame.FIR.B.DLC = 2;
-  frame.data.u8[0] = 0x20;  // TCU_PreCondNow_Req // PreCondition Start
-  frame.data.u8[1] = 0x64;  
-    
-  m_can2->Write(&frame_wu);
-  vTaskDelay(500 / portTICK_PERIOD_MS);
-  m_can2->Write(&frame);
-  /*
-  vTaskDelay(50 / portTICK_PERIOD_MS);
-  m_can2->Write(&frame);
-  vTaskDelay(50 / portTICK_PERIOD_MS);*/
+  frame.data.u8[0] = enable ? 0x20 : 0x40;  // TCU_PreCondNow_Req // start / stop
+  frame.data.u8[1] = 0x64;
+
+  if (enable) {
+    // Wake the BCM first: it will not accept a cold precondition request. The
+    // stop path deliberately omits this, since a BCM that is currently
+    // preconditioning is necessarily already awake. This asymmetry is carried
+    // over unchanged from the original valet-mode implementation.
+    CAN_frame_t frame_wu = {};
+    frame_wu.FIR.B.FF = CAN_frame_ext;
+    frame_wu.MsgID = 0xE094000; // NWM_BCM
+    frame_wu.FIR.B.DLC = 6;
+    frame_wu.data.u8[0] = 0x0;
+    frame_wu.data.u8[1] = 0x1;  // SystemCommand // 0x1 wakeup / 0x2 stay active
+    frame_wu.data.u8[2] = 0x0;
+    frame_wu.data.u8[3] = 0x0;
+    frame_wu.data.u8[4] = 0x0;
+    frame_wu.data.u8[5] = 0x0;
+
+    m_can2->Write(&frame_wu);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    m_can2->Write(&frame);
+  }
+  else {
+    m_can2->Write(&frame);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    m_can2->Write(&frame);
+    // Optimistic local update so the UI responds without waiting for the next
+    // STATUS_ECC2 frame on the 50 kbps B-CAN. Retained from the original.
+    StandardMetrics.ms_v_env_hvac->SetValue(false);
+  }
   return Success;
 }
 
-OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandDeactivateValet(const char* pin) {
-  CAN_frame_t frame = {};
-  frame.FIR.B.FF = CAN_frame_ext; 
-  frame.MsgID = 0xE194031; // TCU_PRECOND_NOW
-  frame.FIR.B.DLC = 2;
-  frame.data.u8[0] = 0x40;  // TCU_PreCondNow_Req // PreCondition Stop
-  frame.data.u8[1] = 0x64;  
-  m_can2->Write(&frame);
-  vTaskDelay(50 / portTICK_PERIOD_MS);
-  m_can2->Write(&frame);
-  StandardMetrics.ms_v_env_valet->SetValue(false);
-  
-  /*vTaskDelay(50 / portTICK_PERIOD_MS);
-  m_can2->Write(&frame);
-  vTaskDelay(50 / portTICK_PERIOD_MS);*/
-  return Success;
+// Preconditioning was originally exposed through valet mode (server v2 commands
+// 21/23) because there was no climate-control override. It has moved to
+// CommandClimateControl above, but these remain as permanent aliases so that
+// existing app buttons, scripts and home-automation integrations bound to valet
+// mode keep working. They are supported, not deprecated, and so deliberately do
+// not log a warning.
+//
+// The pin argument is ignored, as it always was here. The base class would call
+// PinCheck(), which fails closed when no PIN is configured -- adding that now
+// would break exactly the users these aliases exist to protect. See
+// docs/index.rst.
+//
+// This module still does not implement real valet mode.
+OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandActivateValet(const char* /*pin*/) {
+  return CommandClimateControl(true);
+}
+
+OvmsVehicle::vehicle_command_t OvmsVehicleFiat500e::CommandDeactivateValet(const char* /*pin*/) {
+  return CommandClimateControl(false);
 }
 
 /*

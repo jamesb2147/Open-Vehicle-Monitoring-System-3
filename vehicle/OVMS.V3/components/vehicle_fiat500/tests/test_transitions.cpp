@@ -91,15 +91,15 @@ static void test_precondition_setpoint_flap() {
         v->IncomingFrameCan2(&at_temp);
     }
 
-    int transitions = g_metrics.transition_count("ms_v_env_valet");
-    printf("    valet transitions over %d thermostat cycles: %d\n",
+    int transitions = g_metrics.transition_count("ms_v_env_hvac");
+    printf("    hvac transitions over %d thermostat cycles: %d\n",
            cycles, transitions);
 
     // FIXED: "setpoint reached" now maps to active, so holding temperature no
     // longer toggles the metric -- and no longer fires a push notification per
     // thermostat cycle. Before the fix this was 50 transitions.
     CHECK(transitions == 1,
-          "valet holds steady across thermostat cycles (was 50)");
+          "hvac holds steady across thermostat cycles (was 50 on valet)");
 
     delete v;
 }

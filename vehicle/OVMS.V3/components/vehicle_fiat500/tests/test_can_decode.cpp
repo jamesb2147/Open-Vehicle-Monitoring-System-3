@@ -180,22 +180,22 @@ static void test_precondition_states() {
     // PreCondCabinSts lives in d[1] bits 6-7: 0x00 off, 0x40 on, 0x80 setpoint reached.
     auto off = make_frame(0x631400A, {0, 0x00, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&off);
-    CHECK(!StandardMetrics.ms_v_env_valet->AsBool(), "precondition off -> valet false");
+    CHECK(!StandardMetrics.ms_v_env_hvac->AsBool(), "precondition off -> hvac false");
 
     auto on = make_frame(0x631400A, {0, 0x40, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&on);
-    CHECK(StandardMetrics.ms_v_env_valet->AsBool(), "precondition on -> valet true");
+    CHECK(StandardMetrics.ms_v_env_hvac->AsBool(), "precondition on -> hvac true");
 
     // FIXED: 0x80 = "setpoint reached" still means the cabin is being
     // conditioned, so it now maps to active instead of falling to default.
     auto setpoint = make_frame(0x631400A, {0, 0x80, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&setpoint);
-    CHECK(StandardMetrics.ms_v_env_valet->AsBool(),
+    CHECK(StandardMetrics.ms_v_env_hvac->AsBool(),
           "setpoint-reached (0x80) is treated as active");
 
     auto both = make_frame(0x631400A, {0, 0xC0, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&both);
-    CHECK(StandardMetrics.ms_v_env_valet->AsBool(), "0xC0 -> valet true");
+    CHECK(StandardMetrics.ms_v_env_hvac->AsBool(), "0xC0 -> hvac true");
 
     delete v;
 }

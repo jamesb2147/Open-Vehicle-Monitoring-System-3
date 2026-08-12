@@ -49,6 +49,9 @@ class OvmsVehicleFiat500e : public OvmsVehicle
     vehicle_command_t CommandStopCharge() override;
     vehicle_command_t CommandLock(const char* pin) override;
     vehicle_command_t CommandUnlock(const char* pin) override;
+    vehicle_command_t CommandClimateControl(bool enable) override;
+    // Aliases for CommandClimateControl, kept permanently for backward
+    // compatibility with setups bound to valet mode. See the .cpp for why.
     vehicle_command_t CommandActivateValet(const char* pin) override;
     vehicle_command_t CommandDeactivateValet(const char* pin) override;
     vehicle_command_t CommandHomelink(int button, int durationms) override;

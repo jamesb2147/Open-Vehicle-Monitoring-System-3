@@ -1,15 +1,17 @@
 // test_commands.cpp — Command TX tests for vehicle_fiat500e.
 //
-// These assert the exact frames each command puts on the bus. Their main job is
-// to protect the upcoming climate-control refactor: preconditioning currently
-// lives behind CommandActivateValet/CommandDeactivateValet and is being moved
-// to CommandClimateControl, with the valet commands retained as aliases. These
-// tests pin the wire behaviour so the move can be proven byte-identical.
+// These assert the exact frames each command puts on the bus.
+//
+// Preconditioning used to live behind CommandActivateValet/CommandDeactivateValet
+// and now lives on CommandClimateControl, with the valet commands retained as
+// permanent aliases. The tests below pin the wire behaviour and prove the two
+// entry points are byte-identical, so setups bound to valet mode are unaffected.
 
 #include "mock/mock_ovms.hpp"
 #include "../src/vehicle_fiat500e.h"
 
 #include <cstdio>
+#include <vector>
 
 extern int tests_run;
 extern int tests_passed;
@@ -21,6 +23,7 @@ extern int tests_passed;
 } while(0)
 
 extern OvmsVehicleFiat500e* make_vehicle();
+extern CAN_frame_t make_frame(uint32_t id, std::initializer_list<uint8_t> bytes);
 
 // Every command frame goes out on CAN2 (B-CAN) except the Homelink ODO probe.
 static canbus* bcan(OvmsVehicleFiat500e* v) { return v->m_can2; }
@@ -93,21 +96,47 @@ static void test_lock_unlock() {
 }
 
 // ---------------------------------------------------------------------------
-// Preconditioning, currently reached via the valet commands.
+// Cabin preconditioning (server v2 command 26), plus the retained valet aliases.
 // ---------------------------------------------------------------------------
 
-static void test_precondition_start_via_valet() {
-    printf("\ntest_precondition_start_via_valet\n");
+// Captures the exact B-CAN traffic for a climate operation, so the valet
+// aliases can be proven byte-identical to the primary command.
+static std::vector<TxRecord> capture_climate(bool enable, bool via_valet) {
+    auto* v = make_vehicle();
+    if (via_valet) {
+        if (enable) v->CommandActivateValet("anything");
+        else        v->CommandDeactivateValet("anything");
+    } else {
+        v->CommandClimateControl(enable);
+    }
+    auto log = bcan(v)->tx_log;
+    delete v;
+    return log;
+}
+
+static bool same_traffic(const std::vector<TxRecord>& a,
+                         const std::vector<TxRecord>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].id != b[i].id || a[i].len != b[i].len ||
+            a[i].extended != b[i].extended) return false;
+        for (int j = 0; j < a[i].len; j++)
+            if (a[i].data[j] != b[i].data[j]) return false;
+    }
+    return true;
+}
+
+static void test_climate_control_start() {
+    printf("\ntest_climate_control_start\n");
     auto* v = make_vehicle();
 
-    v->CommandActivateValet("anything");
+    CHECK(v->CommandClimateControl(true) == Success, "climate on returns Success");
     auto* b = bcan(v);
     dump("B-CAN", b);
 
-    // Note the asymmetry preserved from the original: activate sends a wakeup
-    // frame first (a sleeping BCM will not accept a cold precondition request),
-    // deactivate does not. This must survive the move to CommandClimateControl.
-    CHECK(b->tx_log.size() == 2, "activate sends wakeup + precondition");
+    // The asymmetry from the original valet implementation is preserved:
+    // starting wakes the BCM first, stopping does not.
+    CHECK(b->tx_log.size() == 2, "start sends wakeup + precondition");
     CHECK(b->tx_log.size() == 2 &&
           tx_is(b->tx_log[0], 0xE094000, 6, {0x00, 0x01}),
           "first frame is the NWM_BCM wakeup");
@@ -115,39 +144,58 @@ static void test_precondition_start_via_valet() {
           tx_is(b->tx_log[1], 0xE194031, 2, {0x20, 0x64}),
           "second frame is TCU_PRECOND_NOW start {20,64}");
 
-    // The PIN argument is ignored -- the base class would call PinCheck().
-    CHECK(true, "[NOTE] pin argument is ignored by this override");
-
     delete v;
 }
 
-static void test_precondition_stop_via_valet() {
-    printf("\ntest_precondition_stop_via_valet\n");
+static void test_climate_control_stop() {
+    printf("\ntest_climate_control_stop\n");
     auto* v = make_vehicle();
 
-    v->CommandDeactivateValet("anything");
+    CHECK(v->CommandClimateControl(false) == Success, "climate off returns Success");
     auto* b = bcan(v);
     dump("B-CAN", b);
 
-    CHECK(b->tx_log.size() == 2, "deactivate sends precondition stop x2");
+    CHECK(b->tx_log.size() == 2, "stop sends precondition stop x2");
     CHECK(b->tx_log.size() == 2 &&
           tx_is(b->tx_log[0], 0xE194031, 2, {0x40, 0x64}),
           "TCU_PRECOND_NOW stop {40,64}");
-    CHECK(!StandardMetrics.ms_v_env_valet->AsBool(),
-          "deactivate clears ms_v_env_valet directly");
+    CHECK(!StandardMetrics.ms_v_env_hvac->AsBool(),
+          "stop clears ms_v_env_hvac optimistically");
 
     delete v;
 }
 
-static void test_climate_control_not_implemented_yet() {
-    printf("\ntest_climate_control_not_implemented_yet\n");
-    auto* v = make_vehicle();
+static void test_valet_aliases_are_byte_identical() {
+    printf("\ntest_valet_aliases_are_byte_identical\n");
 
-    // [BUG] Server v2 command 26 (Remote Climate Control) is unhandled, so the
-    // framework's scheduled-preconditioning feature can never drive this car.
-    CHECK(static_cast<OvmsVehicle*>(v)->CommandClimateControl(true) == NotImplemented,
-          "[BUG] CommandClimateControl is not overridden (cmd 26 dead)");
-    CHECK(bcan(v)->tx_log.empty(), "...and puts nothing on the bus");
+    // The whole point of retaining the valet commands: existing setups bound to
+    // them must behave exactly as before the move.
+    CHECK(same_traffic(capture_climate(true,  false), capture_climate(true,  true)),
+          "CommandActivateValet produces identical traffic to ClimateControl(true)");
+    CHECK(same_traffic(capture_climate(false, false), capture_climate(false, true)),
+          "CommandDeactivateValet produces identical traffic to ClimateControl(false)");
+}
+
+static void test_valet_metric_untouched_by_climate() {
+    printf("\ntest_valet_metric_untouched_by_climate\n");
+    auto* v = make_vehicle();
+    g_metrics.reset();
+
+    // Preconditioning must no longer masquerade as valet mode: that is what
+    // caused "Valet mode enabled" notifications and armed the hood/trunk
+    // intrusion alerts while the cabin was being conditioned.
+    v->CommandClimateControl(true);
+    v->CommandActivateValet("anything");
+
+    auto on = make_frame(0x631400A, {0, 0x40, 0, 0, 0, 0, 0, 0});
+    v->IncomingFrameCan2(&on);
+    auto off = make_frame(0x631400A, {0, 0x00, 0, 0, 0, 0, 0, 0});
+    v->IncomingFrameCan2(&off);
+
+    CHECK(g_metrics.transition_count("ms_v_env_valet") == 0,
+          "no climate path ever touches ms_v_env_valet");
+    CHECK(g_metrics.transition_count("ms_v_env_hvac") > 0,
+          "...ms_v_env_hvac carries the state instead");
 
     delete v;
 }
@@ -182,8 +230,9 @@ void test_commands_all() {
     test_wakeup();
     test_start_stop_charge();
     test_lock_unlock();
-    test_precondition_start_via_valet();
-    test_precondition_stop_via_valet();
-    test_climate_control_not_implemented_yet();
+    test_climate_control_start();
+    test_climate_control_stop();
+    test_valet_aliases_are_byte_identical();
+    test_valet_metric_untouched_by_climate();
     test_homelink_horn_lights();
 }
