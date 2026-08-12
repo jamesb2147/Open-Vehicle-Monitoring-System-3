@@ -201,7 +201,7 @@ OvmsVehicleBoltEV::~OvmsVehicleBoltEV()
     WebCleanup();
 #endif
     PollSetPidList(m_can1, NULL);
-    delete m_pPollingList;
+    delete[] m_pPollingList;
 
     MyMetrics.DeregisterMetric(mt_coolant_temp);
     MyMetrics.DeregisterMetric(mt_coolant_heater_pwr);
