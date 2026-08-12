@@ -295,6 +295,7 @@ static void test_odometer() {
 
 void test_transitions_all();
 void test_commands_all();
+void test_lifecycle_all();
 
 int main() {
     printf("=== vehicle_fiat500e native tests ===\n");
@@ -317,6 +318,7 @@ int main() {
 
     test_transitions_all();
     test_commands_all();
+    test_lifecycle_all();
 
     printf("\n=== %d/%d passed ===\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

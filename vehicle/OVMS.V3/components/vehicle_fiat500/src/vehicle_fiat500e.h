@@ -59,6 +59,14 @@ class OvmsVehicleFiat500e : public OvmsVehicle
   protected:
     void Ticker1(uint32_t ticker) override;
 
+    // Called for every received frame on either bus. Refreshes the CAN-data
+    // watchdog and marks the vehicle awake.
+    void CanActivity();
+
+    // Seconds of bus silence remaining before the vehicle is declared asleep.
+    // Zero means "currently asleep / no traffic seen yet".
+    unsigned int m_candata_timer;
+
     OvmsMetricFloat *mt_mb_trip_reset;        // Distance since reset
     OvmsMetricFloat *mt_mb_trip_start;        // Distance since default trip started
     OvmsMetricFloat *mt_mb_consumption_start; //  since default trip started

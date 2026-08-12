@@ -71,25 +71,59 @@ static const char *TAG = "v-fiat500e";
 #include "metrics_standard.h"
 
 
+// Seconds of CAN silence after which the vehicle is considered asleep.
+// Matches the value the Bolt module has used in the field (VA_CANDATA_TIMEOUT).
+#define FT_CANDATA_TIMEOUT 10
+
 OvmsVehicleFiat500e::OvmsVehicleFiat500e()
   {
   ESP_LOGI(TAG, "Start Fiat 500e vehicle module");
-  
+
   // Init metrics:
   ft_v_acelec_pwr  = MyMetrics.InitFloat("xse.v.b.acelec.pwr", SM_STALE_MID, 0, Watts);
   ft_v_htrelec_pwr  = MyMetrics.InitFloat("xse.v.b.htrelec.pwr", SM_STALE_MID, 0, Watts);
 
+  // Start at zero rather than at the timeout, so a module booted next to a
+  // sleeping car stays quiet instead of announcing a sleep transition it never
+  // actually observed.
+  m_candata_timer = 0;
+
   RegisterCanBus(1,CAN_MODE_ACTIVE,CAN_SPEED_500KBPS);
-  RegisterCanBus(2,CAN_MODE_ACTIVE,CAN_SPEED_50KBPS);  
+  RegisterCanBus(2,CAN_MODE_ACTIVE,CAN_SPEED_50KBPS);
   }
 
 OvmsVehicleFiat500e::~OvmsVehicleFiat500e()
   {
   ESP_LOGI(TAG, "Stop Fiat 500e vehicle module");
+  MyMetrics.DeregisterMetric(ft_v_acelec_pwr);
+  MyMetrics.DeregisterMetric(ft_v_htrelec_pwr);
   }
-  
+
+void OvmsVehicleFiat500e::CanActivity()
+  {
+  if (m_candata_timer == 0)
+    ESP_LOGI(TAG, "Car has woken (CAN bus activity)");
+  m_candata_timer = FT_CANDATA_TIMEOUT;
+  // Idempotent: the metric only signals an event when the value actually
+  // changes, so calling this per frame costs a comparison and nothing more.
+  StandardMetrics.ms_v_env_awake->SetValue(true);
+  }
+
 void OvmsVehicleFiat500e::Ticker1(uint32_t ticker)
   {
+  // Without this the module never learns the car has slept: ms_v_env_awake was
+  // never set either way, so vehicle.asleep never fired and the framework's
+  // auto-poweroff never engaged, leaving the module drawing from the 12V
+  // battery indefinitely on a parked car.
+  //
+  // ms_v_env_on is deliberately left alone. Nothing in this module ever sets it
+  // true (there is no ignition-state decode yet), so driving only its false edge
+  // would emit a spurious vehicle.off on the first timeout and nothing after.
+  if (m_candata_timer > 0 && --m_candata_timer == 0)
+    {
+    ESP_LOGI(TAG, "Car has gone to sleep (CAN bus timeout)");
+    StandardMetrics.ms_v_env_awake->SetValue(false);
+    }
   }
 
 class OvmsVehicleFiat500eInit
@@ -117,6 +151,9 @@ class OvmsVehicleFiat500eInit
 //*****************************************************************************
 
 void OvmsVehicleFiat500e::IncomingFrameCan1(CAN_frame_t* p_frame) {
+
+  CanActivity();
+
   
   uint8_t *d = p_frame->data.u8;
   
@@ -271,6 +308,9 @@ void OvmsVehicleFiat500e::IncomingFrameCan1(CAN_frame_t* p_frame) {
 //*****************************************************************************
 
 void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
+
+  CanActivity();
+
   
   uint8_t *d = p_frame->data.u8;
   

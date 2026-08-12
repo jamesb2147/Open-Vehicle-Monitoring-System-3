@@ -10,7 +10,8 @@ SRC := mock/mock_ovms.cpp \
        ../src/vehicle_fiat500e.cpp \
        test_can_decode.cpp \
        test_transitions.cpp \
-       test_commands.cpp
+       test_commands.cpp \
+       test_lifecycle.cpp
 
 all: test
 
