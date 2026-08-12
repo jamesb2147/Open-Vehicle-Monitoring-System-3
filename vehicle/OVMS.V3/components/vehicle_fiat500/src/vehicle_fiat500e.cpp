@@ -445,17 +445,28 @@ void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
     }
     case 0x63D4000: // ENVIRONMENTAL_CONDITIONS
     {
+      // Both signals live in this frame. The temperature branch used to end in
+      // `break`, which left the voltage read below reachable only when the
+      // ambient temperature happened to be exactly zero.
       if (d[0] != 0) {
-      StandardMetrics.ms_v_env_temp->SetValue((d[0]*0.5)-40);
-      //ExternalTemperature (Aussentemperatur)
-      //d[0] 11111111
-      break;
+        StandardMetrics.ms_v_env_temp->SetValue((d[0]*0.5)-40);
+        //ExternalTemperature (Aussentemperatur)
+        //d[0] 11111111
       }
 
+      // BatteryVoltageLevel maxes out at (0x7f * 0.16) = 20.3V, so this is the
+      // 12V accessory battery, not the HV pack. It previously wrote
+      // ms_v_bat_voltage -- which is the HV pack voltage and is also written
+      // from OBCM frame 0xC50A049 with values around 400V, so the two sources
+      // fought and the metric oscillated between roughly 400 and 13.
+      //
+      // Routing it to ms_v_bat_12v_voltage also gives the framework's 12V
+      // monitoring something to read (vehicle.cpp 12v.shutdown / 12v.alert),
+      // which previously had no source on this vehicle.
       float vbat = (d[1]&0x7F);
-      StandardMetrics.ms_v_bat_voltage->SetValue(vbat*0.16);
-      //BatteryVoltageLevel (X+0.16 in Volt)
-      //d[1] 01111111 
+      StandardMetrics.ms_v_bat_12v_voltage->SetValue(vbat*0.16);
+      //BatteryVoltageLevel (X*0.16 in Volt)
+      //d[1] 01111111
       break;
     }
   /*
@@ -470,7 +481,11 @@ void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
     case 0xC414000: // HUMIDITY_000
     {
     //HumSenAirTemp / BEV NEW. Humidity element temperature
-    float itemp = ((uint16_t) d[3] << 1) | (d[4]&0x80 >> 7 );
+    // The mask needs parenthesising: >> binds tighter than &, so
+    // `d[4] & 0x80 >> 7` was evaluated as `d[4] & (0x80 >> 7)`, i.e. `d[4] & 1`.
+    // That read the bottom bit of d[4] instead of the intended top bit, so the
+    // low bit of the temperature was always wrong.
+    float itemp = ((uint16_t) d[3] << 1) | ((d[4] & 0x80) >> 7);
     StandardMetrics.ms_v_env_cabintemp->SetValue(itemp*0.5-40);
     //01111111 10000000
     break;

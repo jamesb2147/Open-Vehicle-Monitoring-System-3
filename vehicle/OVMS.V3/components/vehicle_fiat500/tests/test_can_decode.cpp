@@ -237,23 +237,19 @@ static void test_env_conditions_early_break() {
     printf("\ntest_env_conditions_early_break (0x63D4000)\n");
     auto* v = make_vehicle();
 
-    // Ambient temp present -> temp decoded, then `break` exits before the
-    // voltage read below it.
+    // FIXED: both signals now decode from the same frame.
     auto warm = make_frame(0x63D4000, {100, 0x50, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&warm);
     CHECK(near(StandardMetrics.ms_v_env_temp->AsFloat(), 10.0f),
           "ambient temp 10C from d[0]=100");
-
-    // [BUG] The 12V reading is only reachable when ambient temp is exactly 0.
-    CHECK(g_metrics.write_count("ms_v_bat_voltage") == 0,
-          "[BUG] 12V voltage unreachable while ambient temp is non-zero");
-
-    // With d[0]==0 the voltage decodes -- into the HV pack metric.
-    auto cold = make_frame(0x63D4000, {0, 0x50, 0, 0, 0, 0, 0, 0});
-    v->IncomingFrameCan2(&cold);
     // (0x50 & 0x7f) * 0.16 = 80 * 0.16 = 12.8
-    CHECK(near(StandardMetrics.ms_v_bat_voltage->AsFloat(), 12.8f),
-          "[BUG] 12V battery reading (12.8V) written to HV ms_v_bat_voltage");
+    CHECK(near(StandardMetrics.ms_v_bat_12v_voltage->AsFloat(), 12.8f),
+          "12V voltage decodes even when ambient temp is non-zero");
+
+    // ...and it lands on the 12V metric, not the HV pack metric, which is
+    // written from the OBCM frame with ~400V values.
+    CHECK(g_metrics.write_count("ms_v_bat_voltage") == 0,
+          "HV ms_v_bat_voltage untouched by this frame");
 
     delete v;
 }
@@ -262,16 +258,19 @@ static void test_cabin_temp_precedence() {
     printf("\ntest_cabin_temp_precedence (0xC414000)\n");
     auto* v = make_vehicle();
 
-    // [BUG] itemp = (d[3]<<1) | (d[4]&0x80 >> 7). C++ precedence evaluates
-    // 0x80>>7 == 1 first, so the mask degrades to (d[4] & 1) and the intended
-    // top bit of d[4] is discarded.
+    // FIXED: the mask is now parenthesised, so the top bit of d[4] is read.
+    // was:  (0x50<<1) | (0x80 & 1)        = 160 | 0 = 160 -> 40.0
+    // now:  (0x50<<1) | ((0x80&0x80)>>7)  = 160 | 1 = 161 -> 40.5
     auto f = make_frame(0xC414000, {0, 0, 0, 0x50, 0x80, 0, 0, 0});
     v->IncomingFrameCan2(&f);
+    CHECK(near(StandardMetrics.ms_v_env_cabintemp->AsFloat(), 40.5f),
+          "cabin temp includes d[4] top bit");
 
-    // buggy:   (0x50<<1) | (0x80 & 1) = 160 | 0 = 160 -> 160*0.5-40 = 40.0
-    // correct: (0x50<<1) | ((0x80&0x80)>>7) = 160 | 1 = 161 -> 40.5
+    // The complementary case: top bit clear must give the even half-degree.
+    auto g = make_frame(0xC414000, {0, 0, 0, 0x50, 0x00, 0, 0, 0});
+    v->IncomingFrameCan2(&g);
     CHECK(near(StandardMetrics.ms_v_env_cabintemp->AsFloat(), 40.0f),
-          "[BUG] cabin temp drops d[4] top bit (precedence)");
+          "cabin temp 40.0 when d[4] top bit is clear");
 
     delete v;
 }
