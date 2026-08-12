@@ -62,14 +62,11 @@ static void test_charge_inprogress_storm() {
     printf("    charge_inprogress transitions over %d frame pairs: %d\n",
            cycles, transitions);
 
-    // [BUG] Every single frame flips the metric. In the real firmware each flip
-    // signals vehicle.charge.start / vehicle.charge.stop.
-    CHECK(transitions >= cycles * 2 - 1,
-          "[BUG] charge_inprogress flips on every frame (event storm)");
-
-    // The correct post-fix bound, asserted here as documentation of intent.
-    // Flip this to the active assertion when a single source owns the metric.
-    printf("    (target after fix: <= 2 transitions)\n");
+    // FIXED: 0x820A040 alone owns the metric, so a disagreeing readiness flag
+    // no longer flips it. The state is reached once and then holds.
+    // Before the fix this was 100 transitions (2 per frame pair).
+    CHECK(transitions == 1,
+          "charge_inprogress settles after 1 transition (was 100)");
 
     delete v;
 }
@@ -98,14 +95,11 @@ static void test_precondition_setpoint_flap() {
     printf("    valet transitions over %d thermostat cycles: %d\n",
            cycles, transitions);
 
-    // [BUG] 0x80 is unhandled and falls to default: -> false, so the metric
-    // toggles once per thermostat cycle. In the real firmware each toggle also
-    // fires NotifyValetEnabled()/NotifyValetDisabled() -- a push notification
-    // to the owner's phone, per cycle.
-    CHECK(transitions >= cycles * 2 - 1,
-          "[BUG] valet flaps once per thermostat cycle (notification storm)");
-
-    printf("    (target after fix: 1 transition)\n");
+    // FIXED: "setpoint reached" now maps to active, so holding temperature no
+    // longer toggles the metric -- and no longer fires a push notification per
+    // thermostat cycle. Before the fix this was 50 transitions.
+    CHECK(transitions == 1,
+          "valet holds steady across thermostat cycles (was 50)");
 
     delete v;
 }

@@ -76,12 +76,18 @@ static void test_charge_inprogress_two_sources() {
     CHECK(StandardMetrics.ms_v_charge_inprogress->AsBool(),
           "charge_inprogress true from 0x820A040 S2_Close");
 
-    // [BUG] 0x640A046 (RdyForChrg) independently overwrites the SAME metric.
-    // Two unrelated periodic signals contend for one boolean -> event storm.
+    // FIXED: 0x640A046 (RdyForChrg) no longer writes this metric, so a
+    // disagreeing readiness flag can no longer flip it. 0x820A040 owns it.
     auto b = make_frame(0x640A046, {0, 0, 0, 0, 0, 0x00, 0, 0});
     v->IncomingFrameCan1(&b);
+    CHECK(StandardMetrics.ms_v_charge_inprogress->AsBool(),
+          "0x640A046 no longer overrides charge_inprogress");
+
+    // ...and S2 opening still clears it, so the metric remains live.
+    auto s2_open = make_frame(0x820A040, {0x00, 0x00, 0, 0, 0, 0, 0, 0});
+    v->IncomingFrameCan1(&s2_open);
     CHECK(!StandardMetrics.ms_v_charge_inprogress->AsBool(),
-          "[BUG] 0x640A046 overwrites charge_inprogress set by 0x820A040");
+          "S2 opening clears charge_inprogress");
 
     delete v;
 }
@@ -180,13 +186,12 @@ static void test_precondition_states() {
     v->IncomingFrameCan2(&on);
     CHECK(StandardMetrics.ms_v_env_valet->AsBool(), "precondition on -> valet true");
 
-    // [BUG] 0x80 = "setpoint reached" is unhandled and falls into default: -> false.
-    // The climate system cycles through this state continuously while holding
-    // temperature, so the metric flaps at frame rate.
+    // FIXED: 0x80 = "setpoint reached" still means the cabin is being
+    // conditioned, so it now maps to active instead of falling to default.
     auto setpoint = make_frame(0x631400A, {0, 0x80, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&setpoint);
-    CHECK(!StandardMetrics.ms_v_env_valet->AsBool(),
-          "[BUG] setpoint-reached (0x80) falls to default -> valet false");
+    CHECK(StandardMetrics.ms_v_env_valet->AsBool(),
+          "setpoint-reached (0x80) is treated as active");
 
     auto both = make_frame(0x631400A, {0, 0xC0, 0, 0, 0, 0, 0, 0});
     v->IncomingFrameCan2(&both);

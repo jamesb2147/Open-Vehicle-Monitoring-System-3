@@ -140,16 +140,30 @@ void OvmsVehicleFiat500e::IncomingFrameCan1(CAN_frame_t* p_frame) {
     }   
     case 0x820A040: //MSG29_EVCU
     {
-      StandardMetrics.ms_v_charge_inprogress->SetValue(d[1]&0x10);
-      //ms_v_door_chargeport ?
+      // J1772_S2_Close is the vehicle-side S2 switch. Closed means the vehicle
+      // has completed the charge circuit (J1772 state C), i.e. energy transfer
+      // is under way, which matches ms_v_charge_inprogress ("True = currently
+      // charging"). This frame is the sole owner of that metric.
       //J1772_S2_Close //0x0 open //0x1 closed
       //d[1] 00010000
+      StandardMetrics.ms_v_charge_inprogress->SetValue(d[1]&0x10);
       break;
     }
     case 0x640A046: //MSG06_BPCM
     {
-      StandardMetrics.ms_v_charge_inprogress->SetValue(d[5]&0x4);
-      //StandardMetrics.ms_v_door_chargeport->SetValue(d[5]&0x4);
+      // RdyForChrg is a BPCM readiness/permission flag, not an indication that
+      // charging is under way. It previously also wrote ms_v_charge_inprogress,
+      // so this frame and 0x820A040 above contended for the same boolean and
+      // flipped it on nearly every frame whenever the two disagreed -- for
+      // example while plugged in but not yet drawing current.
+      //
+      // Each flip signals vehicle.charge.start / vehicle.charge.stop, and every
+      // event heap-allocates and queues its name. A dropped non-ticker event is
+      // a deliberate abort() (ovms_events.cpp CheckQueueOverflow), so the
+      // contention was a reboot mechanism, not just noisy reporting.
+      //
+      // The correct destination for RdyForChrg is not established from the bus
+      // documentation available, so it is left undecoded rather than guessed at.
       //RdyForChrg (ready for charge)
       //d[5] 00000100
       break;
@@ -336,6 +350,20 @@ void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
         // PreCondCabinSts  (0x0 off, 0x1 on, 0x2 Set point reached)
         //d[1] 11000000
 	      StandardMetrics.ms_v_env_valet->SetValue(true);
+        break;
+        }
+        case 0x80: {
+        // Set point reached. The cabin is still being conditioned -- the climate
+        // system cycles through this state continuously while holding
+        // temperature -- so it maps to active, not off.
+        //
+        // This case was previously absent and fell through to default: -> false,
+        // which made the metric toggle once per thermostat cycle. Every toggle
+        // signals an event and fires a valet notification, so a parked car
+        // holding temperature produced a continuous stream of both.
+        // See tests/test_transitions.cpp.
+        //d[1] 11000000
+        StandardMetrics.ms_v_env_valet->SetValue(true);
         break;
         }
       default:
