@@ -11,7 +11,8 @@ SRC := mock/mock_ovms.cpp \
        test_can_decode.cpp \
        test_transitions.cpp \
        test_commands.cpp \
-       test_lifecycle.cpp
+       test_lifecycle.cpp \
+       test_charge_state.cpp
 
 all: test
 

@@ -1,10 +1,9 @@
 // test_can_decode.cpp — Native tests for vehicle_fiat500e CAN frame decoding.
 //
-// These are CHARACTERIZATION tests: they lock in what the module does TODAY,
-// including its bugs. Cases that encode known-defective behaviour are marked
-// [BUG] and reference the analysis. When a fix lands, the corresponding
-// assertion flips — which makes the behavioural delta explicit in the diff for
-// a reviewer who has the vehicle and can sanity-check it against reality.
+// Most assertions here pin down corrected behaviour. The few remaining [BUG]
+// cases lock in defects that are provably wrong but cannot be repaired without
+// a vehicle capture, so that the current behaviour is at least documented and
+// any future change to it is deliberate rather than accidental.
 //
 // Run:  make test   (from the tests/ directory)
 
@@ -200,28 +199,6 @@ static void test_precondition_states() {
     delete v;
 }
 
-static void test_charge_state_dead_branches() {
-    printf("\ntest_charge_state_dead_branches (0xA194040)\n");
-    auto* v = make_vehicle();
-
-    // Not charging: the only reachable branch.
-    auto idle = make_frame(0xA194040, {0, 0, 0, 0x00, 0, 0, 0, 0});
-    v->IncomingFrameCan2(&idle);
-    CHECK(StandardMetrics.ms_v_charge_state->AsString() == "topoff",
-          "[BUG] not-charging sets charge_state to 'topoff'");
-    CHECK(!StandardMetrics.ms_v_door_chargeport->AsBool(), "chargeport false when idle");
-
-    // [BUG] (d[3]&0x30) yields only 0x00/0x10/0x20/0x30, so the comparisons
-    // against 0x1/0x2/0x3 are unreachable. A charging frame updates NOTHING.
-    int before = g_metrics.write_count("ms_v_charge_state");
-    auto charging = make_frame(0xA194040, {0, 0, 0, 0x10, 0, 0, 0, 0});
-    v->IncomingFrameCan2(&charging);
-    CHECK(g_metrics.write_count("ms_v_charge_state") == before,
-          "[BUG] charging state 0x10 matches no branch - no metric written");
-
-    delete v;
-}
-
 static void test_locked() {
     printf("\ntest_locked (0x6414000)\n");
     auto* v = make_vehicle();
@@ -295,6 +272,7 @@ static void test_odometer() {
 void test_transitions_all();
 void test_commands_all();
 void test_lifecycle_all();
+void test_charge_state_all();
 
 int main() {
     printf("=== vehicle_fiat500e native tests ===\n");
@@ -309,7 +287,6 @@ int main() {
     printf("\n--- CAN2 decode ---\n");
     test_body_status();
     test_precondition_states();
-    test_charge_state_dead_branches();
     test_locked();
     test_env_conditions_early_break();
     test_cabin_temp_precedence();
@@ -318,6 +295,7 @@ int main() {
     test_transitions_all();
     test_commands_all();
     test_lifecycle_all();
+    test_charge_state_all();
 
     printf("\n=== %d/%d passed ===\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

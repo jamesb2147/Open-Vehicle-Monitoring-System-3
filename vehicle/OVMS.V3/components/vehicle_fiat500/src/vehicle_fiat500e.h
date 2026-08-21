@@ -70,6 +70,9 @@ class OvmsVehicleFiat500e : public OvmsVehicle
     // Zero means "currently asleep / no traffic seen yet".
     unsigned int m_candata_timer;
 
+    // Previous value of ms_v_charge_inprogress, for edge detection in Ticker1.
+    bool m_charge_active;
+
     OvmsMetricFloat *mt_mb_trip_reset;        // Distance since reset
     OvmsMetricFloat *mt_mb_trip_start;        // Distance since default trip started
     OvmsMetricFloat *mt_mb_consumption_start; //  since default trip started

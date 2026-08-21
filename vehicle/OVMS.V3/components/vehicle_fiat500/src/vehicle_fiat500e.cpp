@@ -75,6 +75,12 @@ static const char *TAG = "v-fiat500e";
 // Matches the value the Bolt module has used in the field (VA_CANDATA_TIMEOUT).
 #define FT_CANDATA_TIMEOUT 10
 
+// SOC thresholds used to qualify the charge state. Both are heuristics, in line
+// with how other modules do this: vehicle_boltev splits done/interrupted at 95,
+// vehicle_mgev splits charging/topoff at 99.5.
+#define FT_CHARGE_DONE_SOC   95    // stopping at/above this counts as complete
+#define FT_CHARGE_TOPOFF_SOC 99    // charging at/above this is the CV tail
+
 OvmsVehicleFiat500e::OvmsVehicleFiat500e()
   {
   ESP_LOGI(TAG, "Start Fiat 500e vehicle module");
@@ -87,6 +93,7 @@ OvmsVehicleFiat500e::OvmsVehicleFiat500e()
   // sleeping car stays quiet instead of announcing a sleep transition it never
   // actually observed.
   m_candata_timer = 0;
+  m_charge_active = false;
 
   RegisterCanBus(1,CAN_MODE_ACTIVE,CAN_SPEED_500KBPS);
   RegisterCanBus(2,CAN_MODE_ACTIVE,CAN_SPEED_50KBPS);
@@ -123,6 +130,47 @@ void OvmsVehicleFiat500e::Ticker1(uint32_t ticker)
     {
     ESP_LOGI(TAG, "Car has gone to sleep (CAN bus timeout)");
     StandardMetrics.ms_v_env_awake->SetValue(false);
+    }
+
+  // Charge state is derived here rather than read from ChargingSystemSts; see
+  // the note at 0xA194040 for why that field is not decoded. The binary comes
+  // from ms_v_charge_inprogress (J1772 S2), and SOC qualifies it -- the same
+  // approach vehicle_boltev, vehicle_mgev and vehicle_vweup take.
+  //
+  // Edge-triggered deliberately. ms_v_charge_state changes fire NotifyChargeState(),
+  // so re-asserting it every tick would be another notification source.
+  bool charging = StandardMetrics.ms_v_charge_inprogress->AsBool();
+  float soc = StandardMetrics.ms_v_bat_soc->AsFloat();
+
+  if (charging != m_charge_active)
+    {
+    m_charge_active = charging;
+    StandardMetrics.ms_v_door_chargeport->SetValue(charging);
+    if (charging)
+      {
+      ESP_LOGI(TAG, "Charge started");
+      StandardMetrics.ms_v_charge_state->SetValue("charging");
+      StandardMetrics.ms_v_charge_substate->SetValue("onrequest");
+      }
+    else if (soc >= FT_CHARGE_DONE_SOC)
+      {
+      ESP_LOGI(TAG, "Charge complete (SOC %.0f%%)", soc);
+      StandardMetrics.ms_v_charge_state->SetValue("done");
+      StandardMetrics.ms_v_charge_substate->SetValue("onrequest");
+      }
+    else
+      {
+      ESP_LOGI(TAG, "Charge interrupted (SOC %.0f%%)", soc);
+      StandardMetrics.ms_v_charge_state->SetValue("stopped");
+      StandardMetrics.ms_v_charge_substate->SetValue("interrupted");
+      }
+    }
+  else if (charging)
+    {
+    // Constant-voltage tail. Idempotent, so this only transitions once as the
+    // pack crosses the threshold.
+    StandardMetrics.ms_v_charge_state->SetValue(
+      (soc >= FT_CHARGE_TOPOFF_SOC) ? "topoff" : "charging");
     }
   }
 
@@ -403,38 +451,27 @@ void OvmsVehicleFiat500e::IncomingFrameCan2(CAN_frame_t* p_frame) {
     }
     case 0xA194040: // STATUS_B_EVCU
     {
-      if ((d[3]&0x30) == 0) {
-        //ChargingSystemSts (0x0 Not Charging)
-        //d[3] 01110000
-        //StandardMetrics.ms_v_charge_inprogress->SetValue(false); // False
-        StandardMetrics.ms_v_door_chargeport->SetValue(false); // False
-        StandardMetrics.ms_v_charge_state->SetValue("topoff");
-        break;
-      }
-      if ((d[3]&0x30) == 0x1) {
-        //ChargingSystemSts (0x1 Charging)
-        //d[3] 01110000
-	      //StandardMetrics.ms_v_charge_inprogress->SetValue(true); // True
-        StandardMetrics.ms_v_door_chargeport->SetValue(true); // True
-        StandardMetrics.ms_v_charge_state->SetValue("charging");
-        break;
-      }
-      if ((d[3]&0x30) == 0x2) {
-        //ChargingSystemSts (0x2 Charge Interrupted)
-        //d[3] 01110000
-	      //StandardMetrics.ms_v_charge_inprogress->SetValue(true); // False
-        StandardMetrics.ms_v_door_chargeport->SetValue(true); // True
-        StandardMetrics.ms_v_charge_state->SetValue("stopped");
-        break;
-      }
-      if ((d[3]&0x30) == 0x3) {
-        //ChargingSystemSts (0x3 Charge Complete)
-        //d[3] 01110000
-	      //StandardMetrics.ms_v_charge_inprogress->SetValue(false); // False
-        StandardMetrics.ms_v_door_chargeport->SetValue(false); // True
-        StandardMetrics.ms_v_charge_state->SetValue("done");
-        break;
-      }
+      // ChargingSystemSts is deliberately left undecoded.
+      //
+      // This previously tested (d[3]&0x30) against 0x1/0x2/0x3, which the mask
+      // makes unreachable -- clang reports it as -Wtautological-bitwise-compare.
+      // Only the "not charging" branch ever ran, so ms_v_charge_state was
+      // pinned to "topoff" and ms_v_door_chargeport to false.
+      //
+      // The obvious repair is a missing >>4, but the field itself is doubtful:
+      // the comment here diagrammed the mask as 01110000 (0x70, three bits)
+      // while the code used 0x30 (two bits), and the file header describes
+      // ChargingSystemSts as a 3-bit field (28/3) belonging to a different
+      // message, STATUS_C_EVCU. Guessing at both the width and the 0/1/2/3
+      // mapping would yield a plausible-looking state machine that could be
+      // silently wrong -- worse than one that is visibly stuck.
+      //
+      // Charge state is instead derived in Ticker1 from ms_v_charge_inprogress
+      // and SOC. That is what vehicle_boltev, vehicle_mgev and vehicle_vweup
+      // all do; direct enum mapping (vehicle_teslaroadster) is reserved for
+      // protocols whose values have actually been observed on a vehicle.
+      //
+      // Decoding this field properly needs a capture across a charge session.
       break;
     }
     case 0x6414000: // STATUS_BCM4
